@@ -88,6 +88,16 @@ Or run `/customize` for guided changes.
 
 The codebase is small enough that Claude can safely modify it.
 
+## Useful Skills
+
+After setup, these skills add capabilities to your assistant:
+
+1. `/add-voice-transcription` - Transcribe voice notes using OpenAI Whisper so your assistant can understand and respond to voice messages
+2. `/add-telegram` - Add Telegram as a channel alongside or instead of WhatsApp
+3. `/add-gmail` - Read, send, and manage email from your assistant
+4. `/x-integration` - Post tweets, reply, like, and retweet from your assistant
+5. `/add-telegram-swarm` - Give each agent in a swarm its own Telegram bot identity
+
 ## Contributing
 
 **Don't add features. Add skills.**
