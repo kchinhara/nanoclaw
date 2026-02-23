@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -12,6 +13,7 @@ import {
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { logger } from './logger.js';
+import { validateMount } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -162,6 +164,8 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
+    // For git_push
+    repoPath?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -373,7 +377,121 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'git_push': {
+      if (!data.repoPath) {
+        logger.warn({ sourceGroup }, 'git_push missing repoPath');
+        break;
+      }
+
+      const resolved = resolveContainerPathToHost(
+        data.repoPath,
+        sourceGroup,
+        isMain,
+        registeredGroups,
+      );
+
+      if (!resolved.allowed) {
+        logger.warn(
+          { sourceGroup, repoPath: data.repoPath, reason: resolved.reason },
+          'git_push rejected',
+        );
+        break;
+      }
+
+      try {
+        const output = execSync('git push', {
+          cwd: resolved.hostPath,
+          timeout: 30_000,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        logger.info(
+          { sourceGroup, repoPath: data.repoPath, hostPath: resolved.hostPath, output: output.trim() },
+          'git_push succeeded',
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { sourceGroup, repoPath: data.repoPath, hostPath: resolved.hostPath, error: msg },
+          'git_push failed',
+        );
+      }
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+/**
+ * Resolve a container path (e.g., /workspace/extra/kurama-os) back to the
+ * host filesystem by looking up the source group's additionalMounts config.
+ * Returns the host path only if the mount is valid and read-write.
+ */
+export function resolveContainerPathToHost(
+  containerRepoPath: string,
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+): { allowed: true; hostPath: string; reason: string } | { allowed: false; reason: string } {
+  const EXTRA_PREFIX = '/workspace/extra/';
+
+  if (!containerRepoPath.startsWith(EXTRA_PREFIX)) {
+    return { allowed: false, reason: 'Path must start with /workspace/extra/' };
+  }
+
+  if (containerRepoPath.includes('..')) {
+    return { allowed: false, reason: 'Path must not contain ".."' };
+  }
+
+  // Strip prefix to get the relative path under /workspace/extra/
+  const relativePath = containerRepoPath.slice(EXTRA_PREFIX.length);
+  // The mount name is the first path component (e.g., "kurama-os" from "kurama-os/sub/dir")
+  const mountName = relativePath.split('/')[0];
+  if (!mountName) {
+    return { allowed: false, reason: 'Empty mount name after stripping prefix' };
+  }
+
+  // Find the group entry by folder name
+  const groupEntry = Object.values(registeredGroups).find(
+    (g) => g.folder === sourceGroup,
+  );
+  if (!groupEntry) {
+    return { allowed: false, reason: `Group "${sourceGroup}" not found in registered groups` };
+  }
+
+  const mounts = groupEntry.containerConfig?.additionalMounts;
+  if (!mounts || mounts.length === 0) {
+    return { allowed: false, reason: `Group "${sourceGroup}" has no additional mounts configured` };
+  }
+
+  // Find the mount whose container path matches the mount name
+  const mount = mounts.find((m) => {
+    const derivedContainerPath = m.containerPath || path.basename(m.hostPath);
+    return derivedContainerPath === mountName;
+  });
+
+  if (!mount) {
+    return { allowed: false, reason: `No mount matching "${mountName}" found in group "${sourceGroup}"` };
+  }
+
+  // Validate through the security module
+  const validation = validateMount(mount, isMain);
+  if (!validation.allowed) {
+    return { allowed: false, reason: `Mount validation failed: ${validation.reason}` };
+  }
+
+  // Must be read-write (can't push from a read-only mount)
+  if (validation.effectiveReadonly) {
+    return { allowed: false, reason: `Mount "${mountName}" is read-only — git push requires read-write access` };
+  }
+
+  // Build the full host path: realHostPath + any subdirectory beyond the mount root
+  const subPath = relativePath.slice(mountName.length); // e.g., "/sub/dir" or ""
+  const hostPath = subPath
+    ? path.join(validation.realHostPath!, subPath)
+    : validation.realHostPath!;
+
+  return { allowed: true, hostPath, reason: validation.reason };
 }

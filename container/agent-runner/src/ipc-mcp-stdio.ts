@@ -274,6 +274,57 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'git_push',
+  `Push commits from a mounted repository. The container has no git credentials, so this tool asks the host (which has SSH keys) to run "git push" on your behalf.
+
+Only works for repositories mounted under /workspace/extra/ (i.e., additional mounts configured for your group). The mount must be read-write.`,
+  {
+    repo_path: z.string().describe('Absolute container path to the repo root, e.g. "/workspace/extra/my-repo"'),
+  },
+  async (args) => {
+    const repoPath = args.repo_path;
+
+    // Validate path is under /workspace/extra/
+    if (!repoPath.startsWith('/workspace/extra/')) {
+      return {
+        content: [{ type: 'text' as const, text: `Rejected: repo_path must start with /workspace/extra/. Got: "${repoPath}"` }],
+        isError: true,
+      };
+    }
+
+    // Block path traversal
+    if (repoPath.includes('..')) {
+      return {
+        content: [{ type: 'text' as const, text: `Rejected: repo_path must not contain ".."` }],
+        isError: true,
+      };
+    }
+
+    // Verify .git directory exists
+    const gitDir = path.join(repoPath, '.git');
+    if (!fs.existsSync(gitDir)) {
+      return {
+        content: [{ type: 'text' as const, text: `Rejected: no .git directory found at "${repoPath}". Is this a git repository?` }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'git_push',
+      repoPath,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `git push requested for ${repoPath}. The host will execute the push shortly.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

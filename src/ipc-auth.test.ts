@@ -8,7 +8,7 @@ import {
   getTaskById,
   setRegisteredGroup,
 } from './db.js';
-import { processTaskIpc, IpcDeps } from './ipc.js';
+import { processTaskIpc, IpcDeps, resolveContainerPathToHost } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
@@ -590,5 +590,124 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- git_push authorization (resolveContainerPathToHost) ---
+
+describe('git_push authorization', () => {
+  const groupsWithMounts: Record<string, RegisteredGroup> = {
+    'mounted@g.us': {
+      name: 'Mounted',
+      folder: 'mounted-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      containerConfig: {
+        additionalMounts: [
+          { hostPath: '/home/user/repos/my-repo', readonly: false },
+          { hostPath: '/home/user/docs/notes', readonly: true },
+          { hostPath: '/home/user/repos/custom', containerPath: 'custom-name', readonly: false },
+        ],
+      },
+    },
+    'nomount@g.us': {
+      name: 'NoMount',
+      folder: 'nomount-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    },
+  };
+
+  it('rejects path not under /workspace/extra/', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/group/some-repo',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('/workspace/extra/');
+  });
+
+  it('rejects path traversal with ..', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/../../../etc/passwd',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('..');
+  });
+
+  it('rejects group with no mounts configured', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/some-repo',
+      'nomount-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('no additional mounts');
+  });
+
+  it('rejects non-matching mount name', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/nonexistent-repo',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('No mount matching');
+  });
+
+  it('rejects unknown source group', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/my-repo',
+      'unknown-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('not found');
+  });
+
+  it('rejects empty mount name', () => {
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('Empty mount name');
+  });
+
+  it('matches mount by basename of hostPath', () => {
+    // "my-repo" should match hostPath "/home/user/repos/my-repo"
+    // This will fail at validateMount (no allowlist in test) but should get past mount lookup
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/my-repo',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    // Will be rejected by validateMount (no allowlist) — but the reason should be about
+    // mount validation, NOT about "no mount matching", proving the lookup succeeded
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('Mount validation failed');
+  });
+
+  it('matches mount by explicit containerPath', () => {
+    // "custom-name" should match the mount with containerPath: "custom-name"
+    const result = resolveContainerPathToHost(
+      '/workspace/extra/custom-name',
+      'mounted-group',
+      false,
+      groupsWithMounts,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('Mount validation failed');
   });
 });
